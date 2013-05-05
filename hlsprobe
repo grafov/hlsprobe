@@ -29,9 +29,10 @@ class CupertinoProbe:
     """ Parse variant and stream M3U8-playlists. Parser uses python `m3u8` library.
     Get playlist URLs from the task queue.
     """
-    def __init__(self, playlistq, chunkq, pno, log):
+    def __init__(self, playlistq, chunkq, bugq, pno, log):
         self.playlistq = playlistq
         self.chunkq = chunkq
+        self.bugq = bugq
         self.pno = pno
         self.log = log
 
@@ -49,6 +50,8 @@ class CupertinoProbe:
                             self.log.debug("Playlist queue is full.")
                             time.sleep(3)
                         self.playlistq.put("%s/%s" % (stream.baseuri, stream.uri))
+                    else:
+                        self.bugq.put({"list-empty": "%s/%s" % (stream.baseuri, stream.uri)})
                 else:
                     # Load URLs to media chunks and put them to chunk queue
                     for seg in playlist.segments:
@@ -60,14 +63,16 @@ class CupertinoProbe:
                 self.log.info("Finalize cupertino prober %s." % self.pno)
             except:
                 self.log.warn("Failed to open %s stream" % uri)
+                self.bugq.put({"no-stream": uri})
                 continue
 
 
 class MediaProbe:
     """ Get and analyze media chunks.
     """
-    def __init__(self, chunkq, log):
+    def __init__(self, chunkq, bugq, log):
         self.chunkq = chunkq
+        self.bugq = bugq
         self.log = log
         self.loaded = [] # cache list of already loaded chunks
 
@@ -108,7 +113,7 @@ class Source:
             exit(1)
 
     def __call__(self):
-        """ Читаем список каналов и отдаём задачи в очередь.
+        """ Read the channel list and put tasks to playlist queue.
         """
         while True:
             try:
@@ -122,11 +127,19 @@ class Source:
                 self.log.info("Exit source parser.")
 
 
+class ProblemAnalyzer:
+    def __init__(self, bugq, log):
+        """ Gather and analyze problems with streams. Log it or send mail on critical incidents.
+        """
+        self.bugq = bugq
+        self.log = log
 
-class Notify:
-    """ Уведомление о проблемах.
-    """
-    pass
+    def __call__(self):
+        while True:
+            try:
+                print self.bugq.get(True)
+            except KeyboardInterrupt:
+                self.log.info("Exit problem analyzer.")
 
 
 class FlowController:
@@ -134,13 +147,15 @@ class FlowController:
     """
     def __init__(self, log):
         self.log = log
-        self.playlistq = Queue(32)
-        self.chunkq = Queue(96)
+        playlistq = Queue(32)
+        chunkq = Queue(96)
+        bugq = Queue(16)
         self.slots = []
         for i in range(3):
-            self.slots.append(Process(target=CupertinoProbe(self.playlistq, self.chunkq, i, self.log)))
-        self.slots.append(Process(target=MediaProbe(self.chunkq, self.log)))
-        self.slots.append(Process(target=Source(self.playlistq, self.log)))
+            self.slots.append(Process(target=CupertinoProbe(playlistq, chunkq, bugq, i, self.log)))
+        self.slots.append(Process(target=MediaProbe(chunkq, bugq, self.log)))
+        self.slots.append(Process(target=Source(playlistq, self.log)))
+        self.slots.append(Process(target=ProblemAnalyzer(bugq, self.log)))
 
     def run(self):
         for slot in self.slots:
