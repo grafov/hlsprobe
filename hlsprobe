@@ -17,8 +17,11 @@ import random
 import time
 import signal
 import logging
-import m3u8
 import urllib2
+import smtplib
+import m3u8
+import yaml
+from email.mime.text import MIMEText
 from multiprocessing import Process, Queue
 from subprocess import check_output, call, Popen, PIPE
 
@@ -137,9 +140,38 @@ class ProblemAnalyzer:
     def __call__(self):
         while True:
             try:
-                print self.bugq.get(True)
+                err = self.bugq.get(True)
             except KeyboardInterrupt:
                 self.log.info("Exit problem analyzer.")
+
+
+class Notify:
+    """ Send emails if problems detected.
+    """
+    def __init__(self, mailcf):
+        self.subject = mailcf.subject
+        self.author = mailcf.author
+        self.to = mailcf.adresses
+
+    def send(self, text):
+        msg = MIMEText(text)
+        msg['Subject'] = os.path.expandvars(self.subject)
+        msg['From'] = self.author
+        msg['To'] = self.to
+        mail = smtplib.SMTP("localhost")
+        mail.sendmail(self.author, [self.to.split(';')], msg.as_string())
+        mail.quit()
+
+
+class Config:
+    def __init__(self):
+        try:
+            self.cfg = yaml.load(open(os.path.expanduser(CONFIG)).read().strip().split('\n'))
+        except:
+            exit(1)
+
+    def __call__(self):
+        return self.cfg
 
 
 class FlowController:
