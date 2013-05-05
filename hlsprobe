@@ -102,7 +102,7 @@ class Source:
         self.playlistq = playlistq
         self.log = log
         try:
-            self.streams = open(os.path.expanduser(CONFIG)).read().strip().split('\n')
+            self.streams = [x if not x.startswith('#') else '' for x in open(os.path.expanduser(CONFIG)).read().strip().split('\n')]
         except IOError:
             self.log.fatal("Can't open config file. Exit.")
             exit(1)
