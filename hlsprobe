@@ -104,16 +104,13 @@ class MediaProbe:
 class Source:
     """ Reads config data and puts urls to task queue.
     """
-    def __init__(self, playlistq, log):
+    def __init__(self, playlistq, cf, log):
         """ На входе файл конфига `confile` и очередь задач `playlistq`.
         """
         self.playlistq = playlistq
+        self.cf = cf
+        self.streams = cf["streams"]
         self.log = log
-        try:
-            self.streams = [x if not x.startswith('#') else '' for x in open(os.path.expanduser(CONFIG)).read().strip().split('\n')]
-        except IOError:
-            self.log.fatal("Can't open config file. Exit.")
-            exit(1)
 
     def __call__(self):
         """ Read the channel list and put tasks to playlist queue.
@@ -125,7 +122,7 @@ class Source:
                     time.sleep(3)
                     continue
                 self.playlistq.put(random.choice(self.streams))
-                time.sleep(12)
+                time.sleep(self.cf["timeouts"]["stream-cycle"])
             except KeyboardInterrupt:
                 self.log.info("Exit source parser.")
 
@@ -164,10 +161,16 @@ class Notify:
 
 
 class Config:
-    def __init__(self):
+    """ YAML configuration.
+    """
+    def __init__(self, cf, log):
         try:
-            self.cfg = yaml.load(open(os.path.expanduser(CONFIG)).read().strip().split('\n'))
-        except:
+            self.cfg = yaml.load(open(os.path.expanduser(cf)).read())
+        except IOError:
+            self.log.fatal("Can't open config file. Exit.")
+            exit(1)
+        except yaml.scanner.ScannerError, e:
+            log.fatal("Error parsing config: %s" % e)
             exit(1)
 
     def __call__(self):
@@ -183,10 +186,11 @@ class FlowController:
         chunkq = Queue(96)
         bugq = Queue(16)
         self.slots = []
-        for i in range(3):
+        cf = Config(CONFIG, log)()
+        for i in range(cf["workers"]["stream-probers"]):
             self.slots.append(Process(target=CupertinoProbe(playlistq, chunkq, bugq, i, self.log)))
         self.slots.append(Process(target=MediaProbe(chunkq, bugq, self.log)))
-        self.slots.append(Process(target=Source(playlistq, self.log)))
+        self.slots.append(Process(target=Source(playlistq, cf, self.log)))
         self.slots.append(Process(target=ProblemAnalyzer(bugq, self.log)))
 
     def run(self):
@@ -225,3 +229,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
