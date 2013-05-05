@@ -1,0 +1,180 @@
+#!/usr/bin/env python2
+# -*- coding:utf-8; mode:python -*-
+# ॐ तारे तुत्तारे तुरे स्व
+"""
+HLS Prober for 451 Fahrenheit mediaserver.
+Author: Alexander I.Grafov (Axel) <grafov@gmail.com>
+This utility licensed under GPL v3.
+
+Uses https://pypi.python.org/pypi/m3u8 for M3U8 playlists parsing.
+Scripted in Python2 because m3u8 lib still don't work under Python3.
+"""
+__version__ = "0.1"
+
+import sys
+import os
+import random
+import time
+import signal
+import logging
+import m3u8
+import urllib2
+from multiprocessing import Process, Queue
+from subprocess import check_output, call, Popen, PIPE
+
+CONFIG = "~/.hlsproberc"
+
+
+class CupertinoProbe:
+    """ Parse variant and stream M3U8-playlists. Parser uses python `m3u8` library.
+    Get playlist URLs from the task queue.
+    """
+    def __init__(self, playlistq, chunkq, pno, log):
+        self.playlistq = playlistq
+        self.chunkq = chunkq
+        self.pno = pno
+        self.log = log
+
+    def __call__(self):
+        """ Read and parse a playlist."""
+        while True:
+            try:
+                uri = self.playlistq.get(True)
+                playlist = m3u8.load(uri)
+                self.log.debug("Load playlist from %s" % uri)
+                if playlist.is_variant:
+                    # Load stream playlists and put them back to playlist queue
+                    for stream in playlist.playlists:
+                        while self.playlistq.full():
+                            self.log.debug("Playlist queue is full.")
+                            time.sleep(3)
+                        self.playlistq.put("%s/%s" % (stream.baseuri, stream.uri))
+                else:
+                    # Load URLs to media chunks and put them to chunk queue
+                    for seg in playlist.segments:
+                        while self.chunkq.full():
+                            self.log.debug("Chunk queue is full.")
+                            time.sleep(3)
+                        self.chunkq.put("%s/%s" % (playlist.baseuri, seg.uri))
+            except KeyboardInterrupt:
+                self.log.info("Finalize cupertino prober %s." % self.pno)
+            except:
+                self.log.warn("Failed to open %s stream" % uri)
+                continue
+
+
+class MediaProbe:
+    """ Get and analyze media chunks.
+    """
+    def __init__(self, chunkq, log):
+        self.chunkq = chunkq
+        self.log = log
+        self.loaded = [] # cache list of already loaded chunks
+
+    def __call__(self):
+        while True:
+            try:
+                uri = self.chunkq.get(True)
+                if uri in self.loaded:
+                    self.log.debug("Chunk %s already loaded." % uri)
+                    continue
+                resp = urllib2.urlopen(uri, timeout=6)
+                data = resp.read()
+                self.log.debug("Probed chunk %s (len %d)" % (uri, len(data)))
+                if len(self.loaded) > 96:
+                    self.loaded = self.loaded[32:]
+            except IOError:
+                self.log.error("Error on read %s" % uri)
+            except KeyboardInterrupt:
+                self.log.info("Finalize media prober.")
+
+    def analyze(self):
+        """ TODO Analyze with Mediainfo.
+        """
+        pass
+
+class Source:
+    """ Reads config data and puts urls to task queue.
+    """
+    def __init__(self, playlistq, log):
+        """ На входе файл конфига `confile` и очередь задач `playlistq`.
+        """
+        self.playlistq = playlistq
+        self.log = log
+        try:
+            self.streams = open(os.path.expanduser(CONFIG)).read().strip().split('\n')
+        except IOError:
+            self.log.fatal("Can't open config file. Exit.")
+            exit(1)
+
+    def __call__(self):
+        """ Читаем список каналов и отдаём задачи в очередь.
+        """
+        while True:
+            try:
+                if self.playlistq.full():
+                    self.log.debug("Playlist queue is full.")
+                    time.sleep(3)
+                    continue
+                self.playlistq.put(random.choice(self.streams))
+                time.sleep(12)
+            except KeyboardInterrupt:
+                self.log.info("Exit source parser.")
+
+
+
+class Notify:
+    """ Уведомление о проблемах.
+    """
+    pass
+
+
+class FlowController:
+    """ Manage all probe-tasks over workers.
+    """
+    def __init__(self, log):
+        self.log = log
+        self.playlistq = Queue(32)
+        self.chunkq = Queue(96)
+        self.slots = []
+        for i in range(3):
+            self.slots.append(Process(target=CupertinoProbe(self.playlistq, self.chunkq, i, self.log)))
+        self.slots.append(Process(target=MediaProbe(self.chunkq, self.log)))
+        self.slots.append(Process(target=Source(self.playlistq, self.log)))
+
+    def run(self):
+        for slot in self.slots:
+            slot.start()
+        try:
+            signal.pause()
+        except KeyboardInterrupt:
+            for slot in self.slots:
+                self.log.info("Exit subprocess %s" % slot.pid)
+                slot.terminate()
+            self.log.info("Control process %s interrupted by operator." % os.getpid())
+
+
+def init_log():
+    """ Customizable logging to STDERR.
+    """
+    log = logging.getLogger("hlsprobe")
+    hdlr = logging.StreamHandler(sys.stderr)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    hdlr.setFormatter(formatter)
+    log.addHandler(hdlr)
+    log.setLevel(logging.DEBUG)
+    return log
+
+
+def main():
+    """ Workflow:
+    Source -[playlist url]-> TaskQueue ->>> CupertinoProbe -[chunk url]-> TaskQueue -> MediaProbe [bool]
+    """
+    log = init_log()
+    log.info("HLS Probe v%s started" % __version__)
+    flowc = FlowController(log)
+    flowc.run()
+
+
+if __name__ == "__main__":
+    main()
