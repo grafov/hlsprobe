@@ -9,7 +9,7 @@ This utility licensed under GPL v3.
 Uses https://pypi.python.org/pypi/m3u8 for M3U8 playlists parsing.
 Scripted in Python2 because m3u8 lib still don't work under Python3.
 """
-__version__ = "0.1"
+__version__ = "0.2"
 
 import sys
 import os
@@ -35,6 +35,9 @@ class CupertinoProbe:
     Get playlist URLs from the task queue.
     """
     def __init__(self, playlistq, chunkq, bugq, pno, log):
+        """ Initialized `playlistq` playlist queue, `chunkq` chunk queje, 
+        `bugq` bug queue, `pno` prober instance number and `log` logger object.
+        """
         self.playlistq = playlistq
         self.chunkq = chunkq
         self.bugq = bugq
@@ -52,7 +55,7 @@ class CupertinoProbe:
                     # Load stream playlists and put them back to playlist queue
                     for stream in playlist.playlists:
                         while self.playlistq.full():
-                            self.log.debug("Playlist queue is full.")
+                            self.log.debug("Playlist queue is full. Probably you need to increase number of stream probers. Check `workers/stream-probers` value.")
                             time.sleep(3)
                         self.playlistq.put("%s/%s" % (stream.baseuri, stream.uri))
                     else:
@@ -61,7 +64,7 @@ class CupertinoProbe:
                     # Load URLs to media chunks and put them to chunk queue
                     for seg in playlist.segments:
                         while self.chunkq.full():
-                            self.log.debug("Chunk queue is full.")
+                            self.log.debug("Chunk queue is full. Probably you need to increase number of media probers. Check `workers/media-probers` value.")
                             time.sleep(3)
                         self.chunkq.put("%s/%s" % (playlist.baseuri, seg.uri))
             except KeyboardInterrupt:
@@ -76,6 +79,10 @@ class MediaProbe:
     """ Get and analyze media chunks.
     """
     def __init__(self, chunkq, bugq, pno, log):
+        """ Initialized with `chunkq` chunk queue,
+        `bugq` bug queue, `pno` prober instance number
+        and `log` logger object.
+        """
         self.chunkq = chunkq
         self.bugq = bugq
         self.pno = pno
@@ -109,7 +116,8 @@ class Source:
     """ Reads config data and puts urls to task queue.
     """
     def __init__(self, playlistq, cf, log):
-        """ На входе файл конфига `confile` и очередь задач `playlistq`.
+        """ Initialized with `playlistq` playlist queue,
+        `cf` config dictionary and `log` logger object.
         """
         self.playlistq = playlistq
         self.cf = cf
@@ -140,7 +148,7 @@ class ProblemAnalyzer:
               'empty',    # playlist or chunk is empty
               'media']    # incorrect media info on chunk data or stream metadata
     def __init__(self, bugq, log):
-        """ Initialized with bug queue and logger.
+        """ Initialized with `bugq` bug queue and `log` logger object.
         """
         self.bugq = bugq
         self.log = log
@@ -149,6 +157,7 @@ class ProblemAnalyzer:
         while True:
             try:
                 err = self.bugq.get(True)
+                pprint(err)
             except KeyboardInterrupt:
                 self.log.info("Exit problem analyzer.")
 
@@ -177,6 +186,8 @@ class Config:
     """ YAML configuration.
     """
     def __init__(self, cf, log):
+        """ Initialized with config dictionary and logger object.
+        """
         self.cf = cf
         try:
             # TODO apply defaults
@@ -203,9 +214,9 @@ class FlowController:
         bugq = Queue(16)
         self.slots = []
         cf = Config(cf, log)()
-        for i in range(cf["workers"]["stream-probers"]):
+        for i in range(1, cf["workers"]["stream-probers"]):
             self.slots.append(Process(target=CupertinoProbe(playlistq, chunkq, bugq, i, self.log)))
-        for i in range(cf["workers"]["stream-probers"]):
+        for i in range(1, cf["workers"]["stream-probers"]):
             self.slots.append(Process(target=MediaProbe(chunkq, bugq, i, self.log)))
         self.slots.append(Process(target=Source(playlistq, cf, self.log)))
         self.slots.append(Process(target=ProblemAnalyzer(bugq, self.log)))
@@ -219,7 +230,7 @@ class FlowController:
             for slot in self.slots:
                 self.log.info("Exit subprocess %s" % slot.pid)
                 slot.terminate()
-            self.log.info("Control process %s interrupted by operator." % os.getpid())
+            self.log.info("Control process %s was interrupted by operator." % os.getpid())
 
 
 def init_log(level=logging.WARN):
