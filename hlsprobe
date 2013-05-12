@@ -21,9 +21,11 @@ import urllib2
 import smtplib
 import m3u8
 import yaml
+import optparse
 from email.mime.text import MIMEText
 from multiprocessing import Process, Queue
 from subprocess import check_output, call, Popen, PIPE
+from pprint import pprint
 
 CONFIG = "~/.hlsproberc"
 
@@ -73,9 +75,10 @@ class CupertinoProbe:
 class MediaProbe:
     """ Get and analyze media chunks.
     """
-    def __init__(self, chunkq, bugq, log):
+    def __init__(self, chunkq, bugq, pno, log):
         self.chunkq = chunkq
         self.bugq = bugq
+        self.pno = pno
         self.log = log
         self.loaded = [] # cache list of already loaded chunks
 
@@ -94,12 +97,13 @@ class MediaProbe:
             except IOError:
                 self.log.error("Error on read %s" % uri)
             except KeyboardInterrupt:
-                self.log.info("Finalize media prober.")
+                self.log.info("Finalize media prober %s." % self.pno)
 
     def analyze(self):
         """ TODO Analyze with Mediainfo.
         """
         pass
+
 
 class Source:
     """ Reads config data and puts urls to task queue.
@@ -122,14 +126,21 @@ class Source:
                     time.sleep(3)
                     continue
                 self.playlistq.put(random.choice(self.streams))
-                time.sleep(self.cf["timeouts"]["stream-cycle"])
+                time.sleep(self.cf["timeouts"]["stream-list"])
             except KeyboardInterrupt:
                 self.log.info("Exit source parser.")
 
 
 class ProblemAnalyzer:
+    """ Gather and analyze problems with streams. Log it or send mail on critical incidents.
+    Probers generate errors of types: timeout, status, empty, media. 
+    """
+    errors = ['timeout',  # request timeout, resource not available
+              'status',   # status not 200: resource not found, forbidden, etc.
+              'empty',    # playlist or chunk is empty
+              'media']    # incorrect media info on chunk data or stream metadata
     def __init__(self, bugq, log):
-        """ Gather and analyze problems with streams. Log it or send mail on critical incidents.
+        """ Initialized with bug queue and logger.
         """
         self.bugq = bugq
         self.log = log
@@ -146,6 +157,8 @@ class Notify:
     """ Send emails if problems detected.
     """
     def __init__(self, mailcf):
+        """ Initialized with mail configuration.
+        """
         self.subject = mailcf.subject
         self.author = mailcf.author
         self.to = mailcf.adresses
@@ -164,10 +177,13 @@ class Config:
     """ YAML configuration.
     """
     def __init__(self, cf, log):
+        self.cf = cf
         try:
+            # TODO apply defaults
             self.cfg = yaml.load(open(os.path.expanduser(cf)).read())
+            log.debug("Loaded configuration from the %s." % os.path.expanduser(cf))
         except IOError:
-            self.log.fatal("Can't open config file. Exit.")
+            log.fatal("Can't open config file. Exit.")
             exit(1)
         except yaml.scanner.ScannerError, e:
             log.fatal("Error parsing config: %s" % e)
@@ -180,16 +196,17 @@ class Config:
 class FlowController:
     """ Manage all probe-tasks over workers.
     """
-    def __init__(self, log):
+    def __init__(self, cf, log):
         self.log = log
         playlistq = Queue(32)
         chunkq = Queue(96)
         bugq = Queue(16)
         self.slots = []
-        cf = Config(CONFIG, log)()
+        cf = Config(cf, log)()
         for i in range(cf["workers"]["stream-probers"]):
             self.slots.append(Process(target=CupertinoProbe(playlistq, chunkq, bugq, i, self.log)))
-        self.slots.append(Process(target=MediaProbe(chunkq, bugq, self.log)))
+        for i in range(cf["workers"]["stream-probers"]):
+            self.slots.append(Process(target=MediaProbe(chunkq, bugq, i, self.log)))
         self.slots.append(Process(target=Source(playlistq, cf, self.log)))
         self.slots.append(Process(target=ProblemAnalyzer(bugq, self.log)))
 
@@ -205,7 +222,7 @@ class FlowController:
             self.log.info("Control process %s interrupted by operator." % os.getpid())
 
 
-def init_log():
+def init_log(level=logging.WARN):
     """ Customizable logging to STDERR.
     """
     log = logging.getLogger("hlsprobe")
@@ -213,7 +230,7 @@ def init_log():
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     hdlr.setFormatter(formatter)
     log.addHandler(hdlr)
-    log.setLevel(logging.DEBUG)
+    log.setLevel(level)
     return log
 
 
@@ -221,9 +238,25 @@ def main():
     """ Workflow:
     Source -[playlist url]-> TaskQueue ->>> CupertinoProbe -[chunk url]-> TaskQueue -> MediaProbe [bool]
     """
-    log = init_log()
+    cli = optparse.OptionParser()
+    cli.add_option("--show-config", action="store_true", dest="show_config", help="Show parsed config (for debug purposes).")
+    cli.add_option("--config", dest="cf", help="Use alternative configuration file.")
+    cli.add_option("-v", "--verbose", dest="verbose", action="store_true", help="Show more probing details (for debug purposes).")
+    opt, arg = cli.parse_args()
+    if opt.cf:
+        cf = opt.cf
+    else:
+        cf = CONFIG
+    if opt.show_config:
+        pprint(Config(cf, init_log())())
+        exit()
+    if opt.verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    log = init_log(level)
     log.info("HLS Probe v%s started" % __version__)
-    flowc = FlowController(log)
+    flowc = FlowController(cf, log)
     flowc.run()
 
 
