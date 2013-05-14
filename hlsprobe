@@ -59,7 +59,7 @@ class CupertinoProbe:
                             time.sleep(3)
                         self.playlistq.put("%s/%s" % (stream.baseuri, stream.uri))
                     else:
-                        self.bugq.put({"list-empty": "%s/%s" % (stream.baseuri, stream.uri)})
+                        self.bugq.put(["empty", uri, "%s/%s" % (stream.baseuri, stream.uri)])
                 else:
                     # Load URLs to media chunks and put them to chunk queue
                     for seg in playlist.segments:
@@ -130,10 +130,16 @@ class Source:
         while True:
             try:
                 if self.playlistq.full():
-                    self.log.debug("Playlist queue is full.")
+                    self.log.debug("Playlist queue is full. Probably you need to increase number of stream probers. Check `workers/stream-probers` value.")
                     time.sleep(3)
                     continue
-                self.playlistq.put(random.choice(self.streams))
+                choice = random.choice(self.streams)
+                print choice
+                if type(choice) == dict:
+                    choice = random.choice(choice.keys())
+                    if type(choice) == list:
+                        choice = random.choice(choice)
+                self.playlistq.put(choice)
                 time.sleep(self.cf["timeouts"]["stream-list"])
             except KeyboardInterrupt:
                 self.log.info("Exit source parser.")
@@ -216,8 +222,10 @@ class FlowController:
         cf = Config(cf, log)()
         for i in range(1, cf["workers"]["stream-probers"]):
             self.slots.append(Process(target=CupertinoProbe(playlistq, chunkq, bugq, i, self.log)))
+        log.debug("%d stream probers forked." % cf["workers"]["stream-probers"])
         for i in range(1, cf["workers"]["stream-probers"]):
             self.slots.append(Process(target=MediaProbe(chunkq, bugq, i, self.log)))
+        log.debug("%d media probers forked." % cf["workers"]["media-probers"])
         self.slots.append(Process(target=Source(playlistq, cf, self.log)))
         self.slots.append(Process(target=ProblemAnalyzer(bugq, self.log)))
 
@@ -229,6 +237,7 @@ class FlowController:
         except KeyboardInterrupt:
             for slot in self.slots:
                 self.log.info("Exit subprocess %s" % slot.pid)
+                time.sleep(0.02)
                 slot.terminate()
             self.log.info("Control process %s was interrupted by operator." % os.getpid())
 
@@ -273,4 +282,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
