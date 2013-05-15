@@ -34,10 +34,12 @@ class CupertinoProbe:
     """ Parse variant and stream M3U8-playlists. Parser uses python `m3u8` library.
     Get playlist URLs from the task queue.
     """
-    def __init__(self, playlistq, chunkq, bugq, pno, log):
-        """ Initialized `playlistq` playlist queue, `chunkq` chunk queje, 
-        `bugq` bug queue, `pno` prober instance number and `log` logger object.
+    def __init__(self, cf, playlistq, chunkq, bugq, pno, log):
+        """ Initialized with `cf` config, `playlistq` playlist queue, 
+        `chunkq` chunk queje, `bugq` bug queue, `pno` prober instance number 
+        and `log` logger object.
         """
+        self.cf = cf
         self.playlistq = playlistq
         self.chunkq = chunkq
         self.bugq = bugq
@@ -49,18 +51,26 @@ class CupertinoProbe:
         while True:
             try:
                 uri = self.playlistq.get(True)
-                playlist = m3u8.load(uri)
+                try:
+                    playlist = m3u8.load(uri)
+                except:
+                    self.log.warn("Failed to open %s stream" % uri)
+                    self.bugq.put(["status", "stream", uri])
+                    continue
                 self.log.debug("Load playlist from %s" % uri)
+                time.sleep(self.cf["sleep"]["playlist-open"])
                 if playlist.is_variant:
+                    if not playlist.playlists:
+                        self.bugq.put(["empty", "variant", uri])
                     # Load stream playlists and put them back to playlist queue
                     for stream in playlist.playlists:
                         while self.playlistq.full():
                             self.log.debug("Playlist queue is full. Probably you need to increase number of stream probers. Check `workers/stream-probers` value.")
                             time.sleep(3)
                         self.playlistq.put("%s/%s" % (stream.baseuri, stream.uri))
-                    else:
-                        self.bugq.put(["empty", uri, "%s/%s" % (stream.baseuri, stream.uri)])
                 else:
+                    if not playlist.segments:
+                        self.bugq.put(["empty", "chunklist", uri])
                     # Load URLs to media chunks and put them to chunk queue
                     for seg in playlist.segments:
                         while self.chunkq.full():
@@ -70,19 +80,19 @@ class CupertinoProbe:
             except KeyboardInterrupt:
                 self.log.info("Finalize cupertino prober %s." % self.pno)
             except:
-                self.log.warn("Failed to open %s stream" % uri)
-                self.bugq.put({"no-stream": uri})
+                self.bugq.put(["other", "stream", uri])
                 continue
 
 
 class MediaProbe:
     """ Get and analyze media chunks.
     """
-    def __init__(self, chunkq, bugq, pno, log):
-        """ Initialized with `chunkq` chunk queue,
-        `bugq` bug queue, `pno` prober instance number
-        and `log` logger object.
+    def __init__(self, cf, chunkq, bugq, pno, log):
+        """ Initialized with `cf` configuration object, 
+        `chunkq` chunk queue, `bugq` bug queue, 
+        `pno` prober instance number and `log` logger object.
         """
+        self.cf = cf
         self.chunkq = chunkq
         self.bugq = bugq
         self.pno = pno
@@ -96,7 +106,7 @@ class MediaProbe:
                 if uri in self.loaded:
                     self.log.debug("Chunk %s already loaded." % uri)
                     continue
-                resp = urllib2.urlopen(uri, timeout=6)
+                resp = urllib2.urlopen(uri, timeout=self.cf["timeout"]["chunk-read"])
                 data = resp.read()
                 self.log.debug("Probed chunk %s (len %d)" % (uri, len(data)))
                 if len(self.loaded) > 96:
@@ -115,12 +125,12 @@ class MediaProbe:
 class Source:
     """ Reads config data and puts urls to task queue.
     """
-    def __init__(self, playlistq, cf, log):
-        """ Initialized with `playlistq` playlist queue,
-        `cf` config dictionary and `log` logger object.
+    def __init__(self, cf, playlistq, log):
+        """ Initialized with `cf` config dictionary
+        `playlistq` playlist queue, and `log` logger object.
         """
-        self.playlistq = playlistq
         self.cf = cf
+        self.playlistq = playlistq
         self.streams = cf["streams"]
         self.log = log
 
@@ -134,13 +144,12 @@ class Source:
                     time.sleep(3)
                     continue
                 choice = random.choice(self.streams)
-                print choice
                 if type(choice) == dict:
                     choice = random.choice(choice.keys())
                     if type(choice) == list:
                         choice = random.choice(choice)
                 self.playlistq.put(choice)
-                time.sleep(self.cf["timeouts"]["stream-list"])
+                time.sleep(self.cf["sleep"]["streams-list"])
             except KeyboardInterrupt:
                 self.log.info("Exit source parser.")
 
@@ -221,12 +230,12 @@ class FlowController:
         self.slots = []
         cf = Config(cf, log)()
         for i in range(1, cf["workers"]["stream-probers"]):
-            self.slots.append(Process(target=CupertinoProbe(playlistq, chunkq, bugq, i, self.log)))
+            self.slots.append(Process(target=CupertinoProbe(cf, playlistq, chunkq, bugq, i, self.log)))
         log.debug("%d stream probers forked." % cf["workers"]["stream-probers"])
         for i in range(1, cf["workers"]["stream-probers"]):
-            self.slots.append(Process(target=MediaProbe(chunkq, bugq, i, self.log)))
+            self.slots.append(Process(target=MediaProbe(cf, chunkq, bugq, i, self.log)))
         log.debug("%d media probers forked." % cf["workers"]["media-probers"])
-        self.slots.append(Process(target=Source(playlistq, cf, self.log)))
+        self.slots.append(Process(target=Source(cf, playlistq, self.log)))
         self.slots.append(Process(target=ProblemAnalyzer(bugq, self.log)))
 
     def run(self):
@@ -237,7 +246,7 @@ class FlowController:
         except KeyboardInterrupt:
             for slot in self.slots:
                 self.log.info("Exit subprocess %s" % slot.pid)
-                time.sleep(0.02)
+                time.sleep(0.01)
                 slot.terminate()
             self.log.info("Control process %s was interrupted by operator." % os.getpid())
 
