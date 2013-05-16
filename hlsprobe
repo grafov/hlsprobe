@@ -50,38 +50,38 @@ class CupertinoProbe:
         """ Read and parse a playlist."""
         while True:
             try:
-                uri = self.playlistq.get(True)
+                group, uri = self.playlistq.get(True)
                 try:
                     playlist = m3u8.load(uri)
                 except:
-                    self.log.warn("Failed to open %s stream" % uri)
-                    self.bugq.put(["status", "stream", uri])
+                    self.log.warn("Failed to open %s %s stream " % (group, uri))
+                    self.bugq.put(["status", "stream", group, uri])
                     continue
-                self.log.debug("Load playlist from %s" % uri)
+                self.log.debug("Load playlist from %s %s" % (group, uri))
                 time.sleep(self.cf["sleep"]["playlist-open"])
                 if playlist.is_variant:
                     if not playlist.playlists:
-                        self.bugq.put(["empty", "variant", uri])
+                        self.bugq.put(["empty", "variant", group, uri])
                     # Load stream playlists and put them back to playlist queue
                     for stream in playlist.playlists:
                         while self.playlistq.full():
                             self.log.debug("Playlist queue is full. Probably you need to increase number of stream probers. Check `workers/stream-probers` value.")
                             time.sleep(3)
-                        self.playlistq.put("%s/%s" % (stream.baseuri, stream.uri))
+                        self.playlistq.put((group, "%s/%s" % (stream.baseuri, stream.uri)))
                 else:
                     if not playlist.segments:
-                        self.bugq.put(["empty", "chunklist", uri])
+                        self.bugq.put(["empty", "chunklist", group, uri])
                     # Load URLs to media chunks and put them to chunk queue
                     for seg in playlist.segments:
                         while self.chunkq.full():
                             self.log.debug("Chunk queue is full. Probably you need to increase number of media probers. Check `workers/media-probers` value.")
                             time.sleep(3)
-                        self.chunkq.put("%s/%s" % (playlist.baseuri, seg.uri))
+                        self.chunkq.put((group, uri, "%s/%s" % (playlist.baseuri, seg.uri)))
             except KeyboardInterrupt:
                 self.log.info("Finalize cupertino prober %s." % self.pno)
-            except:
-                self.bugq.put(["other", "stream", uri])
-                continue
+            #except:
+            #    self.bugq.put(["other", "stream"])
+            #    continue
 
 
 class MediaProbe:
@@ -102,9 +102,9 @@ class MediaProbe:
     def __call__(self):
         while True:
             try:
-                uri = self.chunkq.get(True)
+                group, stream, uri = self.chunkq.get(True)
                 if uri in self.loaded:
-                    self.log.debug("Chunk %s already loaded." % uri)
+                    self.log.debug("Chunk %s for %s %s already loaded." % (uri, group, stream))
                     continue
                 resp = urllib2.urlopen(uri, timeout=self.cf["timeout"]["chunk-read"])
                 data = resp.read()
@@ -112,7 +112,7 @@ class MediaProbe:
                 if len(self.loaded) > 96:
                     self.loaded = self.loaded[32:]
             except IOError:
-                self.log.error("Error on read %s" % uri)
+                self.log.error("Error on read %s of %s %s" % (uri, group, stream))
             except KeyboardInterrupt:
                 self.log.info("Finalize media prober %s." % self.pno)
 
@@ -133,6 +133,27 @@ class Source:
         self.playlistq = playlistq
         self.streams = cf["streams"]
         self.log = log
+        self.streamlist = []
+        self._walk(cf["streams"])
+
+    def _walk(self, streams, parent=""):
+        """ Recursive walk of `streams` configuration tree.
+        """
+        if type(streams) == dict:
+            for key in streams.keys():
+                if parent:
+                    parent += "/%s" % key
+                else:
+                    parent = key
+                self._walk(streams[key], parent)
+        elif type(streams) == list:
+            for val in streams:
+                if type(val) == str and val.startswith("http"):
+                    self.streamlist.append((parent, val))
+                elif type(val) is dict:
+                    self._walk(val, parent)
+        elif type(streams) == str:
+            self.streamlist.append((parent, streams))
 
     def __call__(self):
         """ Read the channel list and put tasks to playlist queue.
@@ -143,11 +164,7 @@ class Source:
                     self.log.debug("Playlist queue is full. Probably you need to increase number of stream probers. Check `workers/stream-probers` value.")
                     time.sleep(3)
                     continue
-                choice = random.choice(self.streams)
-                if type(choice) == dict:
-                    choice = random.choice(choice.keys())
-                    if type(choice) == list:
-                        choice = random.choice(choice)
+                choice = random.choice(self.streamlist)
                 self.playlistq.put(choice)
                 time.sleep(self.cf["sleep"]["streams-list"])
             except KeyboardInterrupt:
