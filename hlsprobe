@@ -55,7 +55,7 @@ class CupertinoProbe:
                 group, uri = self.playlistq.get(True)
                 try:
                     playlist = m3u8.load(uri)
-                except URLError:
+                except: # URLError:
                    self.log.warn("Failed to open %s %s stream " % (group, uri))
                    self.err("status", "stream", group, uri)
                    continue
@@ -63,7 +63,7 @@ class CupertinoProbe:
                 time.sleep(self.cf["sleep"]["playlist-open"])
                 if playlist.is_variant:
                     if not playlist.playlists:
-                        self.bugq.put(("empty", "variant", group, uri))
+                        self.err("empty", "variant", group, uri)
                     # Load stream playlists and put them back to playlist queue
                     for stream in playlist.playlists:
                         while self.playlistq.full():
@@ -72,7 +72,7 @@ class CupertinoProbe:
                         self.playlistq.put((group, "%s/%s" % (stream.baseuri, stream.uri)))
                 else:
                     if not playlist.segments:
-                        self.bugq.put(("empty", "chunklist", group, uri))
+                        self.err("empty", "chunklist", group, uri)
                     # Load URLs to media chunks and put them to chunk queue
                     for seg in playlist.segments:
                         while self.chunkq.full():
@@ -203,7 +203,21 @@ class ErrContainer:
         self.group = group
         self.uri = uri
         self.desc = desc
-        self.put.bugq(self)
+        self.put()
+
+    def put(self):
+        msg = {"stamp": self.stamp, "category": self.category, "objtype": self.objtype,
+               "group": self.group, "uri": self.uri, "desc": self.desc}
+        self.bugq.put(msg)
+
+    def get(self, msg):
+        self.stamp = msg["stamp"]
+        self.category = msg["category"]
+        self.objtype = msg["objtype"]
+        self.group = msg["group"]
+        self.uri = msg["uri"]
+        self.desc = msg["desc"]
+
 
 class ProblemAnalyzer:
     """ Gather and analyze problems with streams. Log it or send mail on critical incidents.
@@ -215,14 +229,16 @@ class ProblemAnalyzer:
         self.bugq = bugq
         self.log = log
         self.notify = Notify(cf, log)
+        self.err = ErrContainer(bugq)
 
     def __call__(self):
         while True:
             try:
                 err = self.bugq.get(True)
-                print "Error:",
+                print "Error:",                
                 pprint(err)
-                self.notify.send("%s %s %s\n%s" % (err[0], err[1], err[2], err[3]))
+                self.err.get(err)
+                self.notify.send("%s %s %s" % (self.err.category, self.err.objtype, self.err.uri))
             except KeyboardInterrupt:
                 self.log.info("Exit problem analyzer.")
 
@@ -240,11 +256,15 @@ class Notify:
 
     def send(self, text):
         msg = MIMEText(text)
-        msg['Subject'] = os.path.expandvars(self.subject)
+        msg['Subject'] = check_output('bash -c "echo %s"' % self.subject, shell=True)
         msg['From'] = self.author
         msg['To'] = self.to
         mail = smtplib.SMTP("localhost")
-        mail.sendmail(self.author, self.to.split(';'), msg.as_string())
+        try:
+            mail.sendmail(self.author, self.to.split(';'), msg.as_string())
+        except SMTPRecipientsRefused:
+            #self.log.debug(
+            pass
         mail.quit()
 
 
@@ -333,7 +353,7 @@ def main():
     if opt.verbose:
         level = logging.DEBUG
     else:
-        level = logging.INFO
+        level = logging.WARN
     log = init_log(level)
     log.info("HLS Probe v%s started" % __version__)
     flowc = FlowController(cf, log)
