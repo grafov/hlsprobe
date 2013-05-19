@@ -1,0 +1,27 @@
+# Sample config for the `hlsprobe`
+#
+# Configuration file in YAML format (http://yaml.org).
+# In current version of hlsprobe all sections of config file must be exist.
+
+# Define streams define URIs to streams
+#
+streams:
+  # Just place here URIs to variant playlists or chunklists
+  - http://example.com/playlist1.m3u8
+  - http://example.com/playlist2.m3u8
+  # You may group links (for example group channels by servers).
+  # Groups in this list is optional, in simple case you just place links to playlists without group hierarchy.
+  - server1: # Group names appears in error messages of hlsprobe.
+      - http://srv1.example.com/playlist1.m3u8
+      - http://example.com/playlist2.m3u8
+  - server2:
+      - http://srv1.example.com/playlist1.m3u8
+      - http://example.com/playlist2.m3u8
+      - subgroup: # Groups may be nested to any level.
+          - http://srv1.example.com/playlist1.m3u8
+          - http://example.com/playlist2.m3u8
+
+# Define number of workers (independent proceses which parse and analyze playlists).
+workers:
+  
+      
