@@ -1,6 +1,7 @@
 #!/usr/bin/env python2
 # -*- coding:utf-8; mode:python -*-
 # ॐ तारे तुत्तारे तुरे स्व
+#
 """
 HLS Prober for 451 Fahrenheit mediaserver.
 Author: Alexander I.Grafov (Axel) <grafov@gmail.com>
@@ -43,6 +44,7 @@ class CupertinoProbe:
         self.playlistq = playlistq
         self.chunkq = chunkq
         self.bugq = bugq
+        self.err = ErrContainer(bugq)
         self.pno = pno
         self.log = log
 
@@ -53,15 +55,15 @@ class CupertinoProbe:
                 group, uri = self.playlistq.get(True)
                 try:
                     playlist = m3u8.load(uri)
-                except:
-                    self.log.warn("Failed to open %s %s stream " % (group, uri))
-                    self.bugq.put(["status", "stream", group, uri])
-                    continue
+                except URLError:
+                   self.log.warn("Failed to open %s %s stream " % (group, uri))
+                   self.err("status", "stream", group, uri)
+                   continue
                 self.log.debug("Load playlist from %s %s" % (group, uri))
                 time.sleep(self.cf["sleep"]["playlist-open"])
                 if playlist.is_variant:
                     if not playlist.playlists:
-                        self.bugq.put(["empty", "variant", group, uri])
+                        self.bugq.put(("empty", "variant", group, uri))
                     # Load stream playlists and put them back to playlist queue
                     for stream in playlist.playlists:
                         while self.playlistq.full():
@@ -70,7 +72,7 @@ class CupertinoProbe:
                         self.playlistq.put((group, "%s/%s" % (stream.baseuri, stream.uri)))
                 else:
                     if not playlist.segments:
-                        self.bugq.put(["empty", "chunklist", group, uri])
+                        self.bugq.put(("empty", "chunklist", group, uri))
                     # Load URLs to media chunks and put them to chunk queue
                     for seg in playlist.segments:
                         while self.chunkq.full():
@@ -94,10 +96,10 @@ class MediaProbe:
         """
         self.cf = cf
         self.chunkq = chunkq
-        self.bugq = bugq
         self.pno = pno
         self.log = log
         self.loaded = [] # cache list of already loaded chunks
+        self.err = ErrContainer(bugq)
 
     def __call__(self):
         while True:
@@ -113,6 +115,7 @@ class MediaProbe:
                     self.loaded = self.loaded[32:]
             except IOError:
                 self.log.error("Error on read %s of %s %s" % (uri, group, stream))
+                self.err("status", "chunk", group, stream, uri)
             except KeyboardInterrupt:
                 self.log.info("Finalize media prober %s." % self.pno)
 
@@ -170,26 +173,56 @@ class Source:
             except KeyboardInterrupt:
                 self.log.info("Exit source parser.")
 
+    def get_streams(self):
+        return self.streamlist
+
+
+class ErrContainer:
+    """ Container for transferring error messages between processes.
+    """
+    errors = ['timeout',  # request timeout, resource not available
+              'status',   # status not equal 200 (resource not found, forbidden, etc.)
+              'empty',    # playlist or chunk is empty
+              'meta',
+              'other']     # incorrect media info on chunk data or stream metadata
+
+    def __init__(self, bugq):
+        """ Initialized with `bugq` bug queue and `where` place where error appear.
+        """
+        self.bugq = bugq
+        self.category = "other"
+        self.objtype = ""
+        self.group = ""
+        self.uri = ""
+        self.desc = ""
+
+    def __call__(self, category="other", objtype="", group="", uri="", desc=""):
+        self.stamp = time.time()
+        self.category = category
+        self.objtype = objtype
+        self.group = group
+        self.uri = uri
+        self.desc = desc
+        self.put.bugq(self)
 
 class ProblemAnalyzer:
     """ Gather and analyze problems with streams. Log it or send mail on critical incidents.
     Probers generate errors of types: timeout, status, empty, media. 
     """
-    errors = ['timeout',  # request timeout, resource not available
-              'status',   # status not 200: resource not found, forbidden, etc.
-              'empty',    # playlist or chunk is empty
-              'media']    # incorrect media info on chunk data or stream metadata
-    def __init__(self, bugq, log):
+    def __init__(self, cf, bugq, log):
         """ Initialized with `bugq` bug queue and `log` logger object.
         """
         self.bugq = bugq
         self.log = log
+        self.notify = Notify(cf, log)
 
     def __call__(self):
         while True:
             try:
                 err = self.bugq.get(True)
+                print "Error:",
                 pprint(err)
+                self.notify.send("%s %s %s\n%s" % (err[0], err[1], err[2], err[3]))
             except KeyboardInterrupt:
                 self.log.info("Exit problem analyzer.")
 
@@ -197,12 +230,13 @@ class ProblemAnalyzer:
 class Notify:
     """ Send emails if problems detected.
     """
-    def __init__(self, mailcf):
+    def __init__(self, cf, log):
         """ Initialized with mail configuration.
         """
-        self.subject = mailcf.subject
-        self.author = mailcf.author
-        self.to = mailcf.adresses
+        self.subject = cf["notify"]["subject"]
+        self.author = cf["notify"]["author"]
+        self.to = cf["notify"]["adresses"]
+        self.log = log
 
     def send(self, text):
         msg = MIMEText(text)
@@ -210,7 +244,7 @@ class Notify:
         msg['From'] = self.author
         msg['To'] = self.to
         mail = smtplib.SMTP("localhost")
-        mail.sendmail(self.author, [self.to.split(';')], msg.as_string())
+        mail.sendmail(self.author, self.to.split(';'), msg.as_string())
         mail.quit()
 
 
@@ -241,19 +275,19 @@ class FlowController:
     """
     def __init__(self, cf, log):
         self.log = log
-        playlistq = Queue(32)
-        chunkq = Queue(96)
-        bugq = Queue(16)
         self.slots = []
         cf = Config(cf, log)()
+        playlistq = Queue(cf["workers"]["stream-probers"]*6)
+        chunkq = Queue(cf["workers"]["media-probers"]*12)
+        bugq = Queue(cf["workers"]["stream-probers"]*2 + cf["workers"]["media-probers"]*2)
         for i in range(1, cf["workers"]["stream-probers"]):
-            self.slots.append(Process(target=CupertinoProbe(cf, playlistq, chunkq, bugq, i, self.log)))
+            self.slots.append(Process(target=CupertinoProbe(cf, playlistq, chunkq, bugq, i, log)))
         log.debug("%d stream probers forked." % cf["workers"]["stream-probers"])
         for i in range(1, cf["workers"]["stream-probers"]):
-            self.slots.append(Process(target=MediaProbe(cf, chunkq, bugq, i, self.log)))
+            self.slots.append(Process(target=MediaProbe(cf, chunkq, bugq, i, log)))
         log.debug("%d media probers forked." % cf["workers"]["media-probers"])
-        self.slots.append(Process(target=Source(cf, playlistq, self.log)))
-        self.slots.append(Process(target=ProblemAnalyzer(bugq, self.log)))
+        self.slots.append(Process(target=Source(cf, playlistq, log)))
+        self.slots.append(Process(target=ProblemAnalyzer(cf, bugq, log)))
 
     def run(self):
         for slot in self.slots:
@@ -308,3 +342,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# TODO сообщать о проблемах конфигурации в очередь ошибок
+
