@@ -18,11 +18,11 @@ This utility can't be used for HLS playback.
 Install
 -------
 
-  pip install m3u8
+`pip install m3u8`
 
 Get repo, cd to it and copy hlsproberc-sample to ~/.hlsproberc. Edit it for your needs.
 
-  ./hlsprobe
+`./hlsprobe`
 
 Similar projects
 ----------------
