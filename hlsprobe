@@ -262,7 +262,7 @@ class Notify:
         mail = smtplib.SMTP("localhost")
         try:
             mail.sendmail(self.author, self.to.split(';'), msg.as_string())
-        except SMTPRecipientsRefused:
+        except: # SMTPRecipientsRefused:
             #self.log.debug(
             pass
         mail.quit()
