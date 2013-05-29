@@ -1,7 +1,7 @@
 #!/usr/bin/env python2
-# -*- coding:utf-8; mode:python -*-
-# ॐ तारे तुत्तारे तुरे स्व
+# -*- mode:python; coding:utf-8 -*-
 #
+# ॐ तारे तुत्तारे तुरे स्व
 """
 HLS Prober for 451 Fahrenheit mediaserver.
 Author: Alexander I.Grafov (Axel) <grafov@gmail.com>
@@ -23,9 +23,10 @@ import smtplib
 import m3u8
 import yaml
 import optparse
+import urlparse
 from email.mime.text import MIMEText
 from multiprocessing import Process, Queue
-from subprocess import check_output, call, Popen, PIPE
+from subprocess import check_output #, call, Popen, PIPE
 from pprint import pprint
 
 CONFIG = "~/.hlsproberc"
@@ -35,12 +36,12 @@ class CupertinoProbe:
     """ Parse variant and stream M3U8-playlists. Parser uses python `m3u8` library.
     Get playlist URLs from the task queue.
     """
-    def __init__(self, cf, playlistq, chunkq, bugq, pno, log):
-        """ Initialized with `cf` config, `playlistq` playlist queue, 
+    def __init__(self, conf, playlistq, chunkq, bugq, pno, log):
+        """ Initialized with `conf` config, `playlistq` playlist queue, 
         `chunkq` chunk queje, `bugq` bug queue, `pno` prober instance number 
         and `log` logger object.
         """
-        self.cf = cf
+        self.conf = conf
         self.playlistq = playlistq
         self.chunkq = chunkq
         self.bugq = bugq
@@ -52,49 +53,61 @@ class CupertinoProbe:
         """ Read and parse a playlist."""
         while True:
             try:
-                group, uri = self.playlistq.get(True)
+                group, name, uri = self.playlistq.get(True)
                 try:
-                    playlist = m3u8.load(uri)
-                except: # URLError:
-                   self.log.warn("Failed to open %s %s stream " % (group, uri))
-                   self.err("status", "stream", group, uri)
-                   continue
+                    resp = urllib2.urlopen(uri, timeout=self.conf["timeout"]["read"])
+                except urllib2.URLError:
+                    self.log.warn("Failed to open (%s) %s stream" % (group, uri))
+                    self.err("timeout", "stream", group, name, uri)
+                    continue
+                # Check for client error or server error
+                status = resp.getcode()
+                if status >= 400:
+                    self.log.warn("Bad status %s for (%s) %s stream" % (status, group, uri))
+                    self.err("status", "stream", group, name, uri, status)
+                    continue
+                rawdata = resp.read()
+                resp.close()
+                try:
+                    playlist = m3u8.loads(rawdata)
+                    baseuri = base_uri(uri)
+                except:
+                    self.log.warn("Failed to parse (%s) %s stream" % (group, uri))
+                    self.err("parsing", "stream", group, name, uri)
+                    continue
                 self.log.debug("Load playlist from %s %s" % (group, uri))
-                time.sleep(self.cf["sleep"]["playlist-open"])
+                time.sleep(self.conf["sleep"]["playlist-open"])
                 if playlist.is_variant:
                     if not playlist.playlists:
-                        self.err("empty", "variant", group, uri)
+                        self.err("empty", "variant", group, name, uri)
                     # Load stream playlists and put them back to playlist queue
                     for stream in playlist.playlists:
                         while self.playlistq.full():
-                            self.log.debug("Playlist queue is full. Probably you need to increase number of stream probers. Check `workers/stream-probers` value.")
+                            self.log.debug("Playlist queue is full (%d). Probably you need to increase number of stream probers. Check `workers/stream-probers` value." % self.playlistq.qsize())
                             time.sleep(3)
-                        self.playlistq.put((group, "%s/%s" % (stream.baseuri, stream.uri)))
+                        self.playlistq.put((group, name, "%s/%s" % (baseuri, stream.uri)))
                 else:
                     if not playlist.segments:
-                        self.err("empty", "chunklist", group, uri)
+                        self.err("empty", "chunklist", group, name, uri)
                     # Load URLs to media chunks and put them to chunk queue
                     for seg in playlist.segments:
                         while self.chunkq.full():
-                            self.log.debug("Chunk queue is full. Probably you need to increase number of media probers. Check `workers/media-probers` value.")
+                            self.log.debug("Chunk queue is full (%d). Probably you need to increase number of media probers. Check `workers/media-probers` value." % self.chunkq.qsize())
                             time.sleep(3)
-                        self.chunkq.put((group, uri, "%s/%s" % (playlist.baseuri, seg.uri)))
+                        self.chunkq.put((time.time(), group, name, "%s/%s" % (baseuri, seg.uri)))
             except KeyboardInterrupt:
                 self.log.info("Finalize cupertino prober %s." % self.pno)
-            #except:
-            #    self.bugq.put(["other", "stream"])
-            #    continue
 
 
 class MediaProbe:
     """ Get and analyze media chunks.
     """
-    def __init__(self, cf, chunkq, bugq, pno, log):
-        """ Initialized with `cf` configuration object, 
+    def __init__(self, conf, chunkq, bugq, pno, log):
+        """ Initialized with `conf` configuration object, 
         `chunkq` chunk queue, `bugq` bug queue, 
         `pno` prober instance number and `log` logger object.
         """
-        self.cf = cf
+        self.conf = conf
         self.chunkq = chunkq
         self.pno = pno
         self.log = log
@@ -104,18 +117,27 @@ class MediaProbe:
     def __call__(self):
         while True:
             try:
-                group, stream, uri = self.chunkq.get(True)
+                stamp, group, name, uri = self.chunkq.get(True)
                 if uri in self.loaded:
-                    self.log.debug("Chunk %s for %s %s already loaded." % (uri, group, stream))
+                    self.log.debug("Chunk %s for %s %s already loaded." % (uri, group, name))
                     continue
-                resp = urllib2.urlopen(uri, timeout=self.cf["timeout"]["chunk-read"])
-                data = resp.read()
+                if time.time() >= stamp + self.conf["timeout"]["target-duration"]:
+                    self.log.info("Media probing is very slow. %s (%s) was skiped." % (uri, group))
+                    continue
+                try:
+                    resp = urllib2.urlopen(uri, timeout=self.conf["timeout"]["read"])
+                    status = resp.getcode()
+                    if status >= 400:
+                        self.log.warn("Bad status %s for (%s) %s stream" % (status, group, uri))
+                        self.err("status", "stream", group, name, uri, status)
+                        continue                        
+                    data = resp.read()
+                except urllib2.URLError:
+                    self.log.error("Error on read %s of %s %s" % (uri, group, name))
+                    self.err("status", "chunk", group, name, uri)
                 self.log.debug("Probed chunk %s (len %d)" % (uri, len(data)))
                 if len(self.loaded) > 96:
                     self.loaded = self.loaded[32:]
-            except IOError:
-                self.log.error("Error on read %s of %s %s" % (uri, group, stream))
-                self.err("status", "chunk", group, stream, uri)
             except KeyboardInterrupt:
                 self.log.info("Finalize media prober %s." % self.pno)
 
@@ -128,16 +150,16 @@ class MediaProbe:
 class Source:
     """ Reads config data and puts urls to task queue.
     """
-    def __init__(self, cf, playlistq, log):
-        """ Initialized with `cf` config dictionary
+    def __init__(self, conf, playlistq, log):
+        """ Initialized with `conf` config dictionary
         `playlistq` playlist queue, and `log` logger object.
         """
-        self.cf = cf
+        self.conf = conf
         self.playlistq = playlistq
-        self.streams = cf["streams"]
+        self.streams = conf["streams"]
         self.log = log
         self.streamlist = []
-        self._walk(cf["streams"])
+        self._walk(conf["streams"])
 
     def _walk(self, streams, parent=""):
         """ Recursive walk of `streams` configuration tree.
@@ -164,16 +186,16 @@ class Source:
         while True:
             try:
                 if self.playlistq.full():
-                    self.log.debug("Playlist queue is full. Probably you need to increase number of stream probers. Check `workers/stream-probers` value.")
+                    self.log.debug("Playlist queue is full (%d). Probably you need to increase number of stream probers. Check `workers/stream-probers` value." % self.playlistq.qsize())
                     time.sleep(3)
                     continue
-                choice = random.choice(self.streamlist)
-                self.playlistq.put(choice)
-                time.sleep(self.cf["sleep"]["streams-list"])
+                group, stream = random.choice(self.streamlist)
+                self.playlistq.put((group, stream, stream))
+                time.sleep(self.conf["sleep"]["streams-list"])
             except KeyboardInterrupt:
                 self.log.info("Exit source parser.")
 
-    def get_streams(self):
+    def flat(self):
         return self.streamlist
 
 
@@ -189,56 +211,100 @@ class ErrContainer:
     def __init__(self, bugq):
         """ Initialized with `bugq` bug queue and `where` place where error appear.
         """
+        self.stamp = 0
         self.bugq = bugq
-        self.category = "other"
+        self.kind = "other"
         self.objtype = ""
         self.group = ""
+        self.stream = ""
         self.uri = ""
-        self.desc = ""
 
-    def __call__(self, category="other", objtype="", group="", uri="", desc=""):
+    def __call__(self, kind="other", objtype="", group="", stream="", uri="", status=200):
         self.stamp = time.time()
-        self.category = category
+        self.kind = kind
         self.objtype = objtype
         self.group = group
+        self.stream = stream
         self.uri = uri
-        self.desc = desc
-        self.put()
-
-    def put(self):
-        msg = {"stamp": self.stamp, "category": self.category, "objtype": self.objtype,
-               "group": self.group, "uri": self.uri, "desc": self.desc}
+        msg = {"stamp": self.stamp, "kind": kind, "objtype": objtype,
+               "group": group, "stream": stream, "uri": uri}
         self.bugq.put(msg)
 
     def get(self, msg):
         self.stamp = msg["stamp"]
-        self.category = msg["category"]
+        self.kind = msg["kind"]
         self.objtype = msg["objtype"]
         self.group = msg["group"]
+        self.stream = msg["stream"]
         self.uri = msg["uri"]
-        self.desc = msg["desc"]
 
 
 class ProblemAnalyzer:
     """ Gather and analyze problems with streams. Log it or send mail on critical incidents.
     Probers generate errors of types: timeout, status, empty, media. 
     """
-    def __init__(self, cf, bugq, log):
+    def __init__(self, conf, bugq, playlistq, chunkq, log):
         """ Initialized with `bugq` bug queue and `log` logger object.
         """
+        self.conf = conf
         self.bugq = bugq
+        self.playlistq = playlistq
         self.log = log
-        self.notify = Notify(cf, log)
+        self.notify = Notify(conf, log)
         self.err = ErrContainer(bugq)
+        self.playlistq = playlistq
+        self.chunkq = chunkq
+        self.errors = {} # key is (group, stream) and value is (stamp, kind, objtype, uri)
+        for val in Source(conf, playlistq, log).flat():
+            self.errors[val] = []        
 
     def __call__(self):
+        nospam = 0
         while True:
             try:
-                err = self.bugq.get(True)
-                print "Error:",                
-                pprint(err)
-                self.err.get(err)
-                self.notify.send("%s %s %s" % (self.err.category, self.err.objtype, self.err.uri))
+                try:
+                    err = self.bugq.get(timeout=6)
+                except:
+                    pass
+                else:
+                    curtime = time.time()
+                    self.err.get(err)
+                    for idx, err in enumerate(self.errors[(self.err.group, self.err.stream)]):
+                        # Remove old errors
+                        if curtime > err["stamp"] + self.conf["timeout"]["error"]:
+                            del self.errors[(self.err.group, self.err.stream)][idx]
+                            continue
+                        if err["kind"] == self.err.kind and err["objtype"] == self.err.objtype and err["uri"] == self.err.uri:
+                            err["count"] += 1
+                            err["reported"] = False
+                            self.errors[(self.err.group, self.err.stream)][idx] = err
+                            break
+                    else:
+                        self.errors[(self.err.group, self.err.stream)].append({"stamp": self.err.stamp, "kind": self.err.kind, "objtype": self.err.objtype, "uri": self.err.uri, "count": 0, "reported": False})        
+                        # If error only once appeared then we do doublecheck
+                        if err["objtype"] == "playlist":
+                            self.playlistq.put((self.err.group, self.err.stream, self.err.uri))
+                        elif err["objtype"] == "chunk":
+                            self.chunkq.put((time.time(), self.err.group, self.err.stream, self.err.uri))
+                nospam += 1
+                if nospam < 6:
+                    continue
+                else:
+                    nospam = 0
+                msg = ""
+                for case in self.errors:
+                    for idx, err in enumerate(self.errors[case]):
+                        # Notify if error has not yet reported
+                        if not err["reported"]:
+                            err["reported"] = True
+                            self.errors[case][idx] = err
+                            print self.errors[(self.err.group, self.err.stream)][idx]
+                            msg += "Problem detected in the %s of the stream %s of the group %s.\n" % (self.err.objtype, self.err.stream, self.err.group)
+                            msg += "Fetch failed in URI %s\n" % self.err.uri
+                            msg += "\n"
+                if msg:
+                    msg = "Dear human,\n\n" + msg + "\n-- \nFor your service,\nHLS prober,\nthe robot."
+                    self.notify.send(msg)
             except KeyboardInterrupt:
                 self.log.info("Exit problem analyzer.")
 
@@ -246,39 +312,41 @@ class ProblemAnalyzer:
 class Notify:
     """ Send emails if problems detected.
     """
-    def __init__(self, cf, log):
+    def __init__(self, conf, log):
         """ Initialized with mail configuration.
         """
-        self.subject = cf["notify"]["subject"]
-        self.author = cf["notify"]["author"]
-        self.to = cf["notify"]["adresses"]
+        self.subject = conf["notify"]["subject"]
+        self.author = conf["notify"]["author"]
+        self.to = conf["notify"]["addresses"]
         self.log = log
 
     def send(self, text):
         msg = MIMEText(text)
         msg['Subject'] = check_output('bash -c "echo %s"' % self.subject, shell=True)
         msg['From'] = self.author
-        msg['To'] = self.to
+        msg['To'] = ", ".join(self.to.split(';'))
+        msg['X-Mailer'] = "HLS Probe v.%s" % __version__
+        print msg.as_string()
         mail = smtplib.SMTP("localhost")
         try:
             mail.sendmail(self.author, self.to.split(';'), msg.as_string())
         except: # SMTPRecipientsRefused:
             #self.log.debug(
-            pass
+            self.log.warn("Can't delivery notification!")
         mail.quit()
 
 
 class Config:
     """ YAML configuration.
     """
-    def __init__(self, cf, log):
+    def __init__(self, conf, log):
         """ Initialized with config dictionary and logger object.
         """
-        self.cf = cf
+        self.conf = conf
         try:
             # TODO apply defaults
-            self.cfg = yaml.load(open(os.path.expanduser(cf)).read())
-            log.debug("Loaded configuration from the %s." % os.path.expanduser(cf))
+            self.cfg = yaml.load(open(os.path.expanduser(conf)).read())
+            log.debug("Loaded configuration from the %s." % os.path.expanduser(conf))
         except IOError:
             log.fatal("Can't open config file. Exit.")
             exit(1)
@@ -293,21 +361,24 @@ class Config:
 class FlowController:
     """ Manage all probe-tasks over workers.
     """
-    def __init__(self, cf, log):
+    def __init__(self, confile, log):
         self.log = log
         self.slots = []
-        cf = Config(cf, log)()
-        playlistq = Queue(cf["workers"]["stream-probers"]*6)
-        chunkq = Queue(cf["workers"]["media-probers"]*12)
-        bugq = Queue(cf["workers"]["stream-probers"]*2 + cf["workers"]["media-probers"]*2)
-        for i in range(1, cf["workers"]["stream-probers"]):
-            self.slots.append(Process(target=CupertinoProbe(cf, playlistq, chunkq, bugq, i, log)))
-        log.debug("%d stream probers forked." % cf["workers"]["stream-probers"])
-        for i in range(1, cf["workers"]["stream-probers"]):
-            self.slots.append(Process(target=MediaProbe(cf, chunkq, bugq, i, log)))
-        log.debug("%d media probers forked." % cf["workers"]["media-probers"])
-        self.slots.append(Process(target=Source(cf, playlistq, log)))
-        self.slots.append(Process(target=ProblemAnalyzer(cf, bugq, log)))
+        conf = Config(confile, log)()
+        # playlistq tasks are lists: (group, stream, uri)
+        playlistq = Queue(conf["workers"]["stream-probers"]*60)
+        # chunkq tasks are lists: (timestamp, group, stream, uri)
+        chunkq = Queue(conf["workers"]["media-probers"]*120)
+        # bugq tasks are dicts: {"stamp", "kind", "objtype", "group", "stream", "uri"} 
+        bugq = Queue(conf["workers"]["stream-probers"]*4 + conf["workers"]["media-probers"]*4)
+        for i in range(1, conf["workers"]["stream-probers"]):
+            self.slots.append(Process(target=CupertinoProbe(conf, playlistq, chunkq, bugq, i, log)))
+        log.debug("%d stream probers forked." % conf["workers"]["stream-probers"])
+        for i in range(1, conf["workers"]["stream-probers"]):
+            self.slots.append(Process(target=MediaProbe(conf, chunkq, bugq, i, log)))
+        log.debug("%d media probers forked." % conf["workers"]["media-probers"])
+        self.slots.append(Process(target=Source(conf, playlistq, log)))
+        self.slots.append(Process(target=ProblemAnalyzer(conf, bugq, playlistq, chunkq, log)))
 
     def run(self):
         for slot in self.slots:
@@ -322,16 +393,52 @@ class FlowController:
             self.log.info("Control process %s was interrupted by operator." % os.getpid())
 
 
-def init_log(level=logging.WARN):
+class Logger:
     """ Customizable logging to STDERR.
     """
-    log = logging.getLogger("hlsprobe")
-    hdlr = logging.StreamHandler(sys.stderr)
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-    hdlr.setFormatter(formatter)
-    log.addHandler(hdlr)
-    log.setLevel(level)
-    return log
+    def __init__(self, verbose):
+        if verbose:
+            level = logging.DEBUG
+        else:
+            level = logging.WARN
+        log = logging.getLogger("hlsprobe")
+        hdlr = logging.StreamHandler(sys.stderr)
+        formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        hdlr.setFormatter(formatter)
+        log.addHandler(hdlr)
+        log.setLevel(level)
+        self.log = log
+        self.last = ""
+
+    def _check_doubles(self, msg):
+        if msg == self.last:
+            return False
+        else:
+            self.last = msg
+            return True
+        
+    def debug(self, msg):
+        if self._check_doubles(msg):
+            self.log.info(msg)
+        
+    def info(self, msg):
+        if self._check_doubles(msg):
+            self.log.info(msg)
+
+    def warn(self, msg):
+        if self._check_doubles(msg):
+            self.log.warn(msg)
+
+    def error(self, msg):
+        if self._check_doubles(msg):
+            self.log.error(msg)
+
+
+def base_uri(uri):
+    parsed_url = urlparse.urlparse(uri)
+    prefix = parsed_url.scheme + '://' + parsed_url.netloc
+    basepath = os.path.normpath(parsed_url.path + '/..')
+    return urlparse.urljoin(prefix, basepath)
 
 
 def main():
@@ -340,23 +447,19 @@ def main():
     """
     cli = optparse.OptionParser()
     cli.add_option("--show-config", action="store_true", dest="show_config", help="Show parsed config (for debug purposes).")
-    cli.add_option("--config", dest="cf", help="Use alternative configuration file.")
+    cli.add_option("--config", dest="conf", help="Use alternative configuration file.")
     cli.add_option("-v", "--verbose", dest="verbose", action="store_true", help="Show more probing details (for debug purposes).")
-    opt, arg = cli.parse_args()
-    if opt.cf:
-        cf = opt.cf
+    opt, _ = cli.parse_args()
+    if opt.conf:
+        confile = opt.conf
     else:
-        cf = CONFIG
+        confile = CONFIG
+    log = Logger(opt.verbose)
     if opt.show_config:
-        pprint(Config(cf, init_log())())
+        pprint(Config(confile, log)())
         exit()
-    if opt.verbose:
-        level = logging.DEBUG
-    else:
-        level = logging.WARN
-    log = init_log(level)
     log.info("HLS Probe v%s started" % __version__)
-    flowc = FlowController(cf, log)
+    flowc = FlowController(confile, log)
     flowc.run()
 
 
