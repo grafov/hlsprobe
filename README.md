@@ -32,4 +32,4 @@ https://code.google.com/p/hls-player/
 Project status
 --------------
 
-[![Is maintained?](http://stillmaintained.com/grafov/hslprobe.png)](http://stillmaintained.com/grafov/hlsprobe)
+[![Is maintained?](http://stillmaintained.com/grafov/hlsprobe.png)](http://stillmaintained.com/grafov/hlsprobe)
