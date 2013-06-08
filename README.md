@@ -18,7 +18,11 @@ This utility can't be used for HLS playback.
 Install
 -------
 
+First install dependencies:
+
 `pip install m3u8`
+
+`pip install PyYAML`
 
 Get repo, cd to it and copy hlsproberc-sample to ~/.hlsproberc. Edit it for your needs.
 
@@ -27,7 +31,8 @@ Get repo, cd to it and copy hlsproberc-sample to ~/.hlsproberc. Edit it for your
 Similar projects
 ----------------
 
-https://code.google.com/p/hls-player/
+ * https://code.google.com/p/hls-player
+ * https://github.com/brookemckim/hlspider
 
 Project status
 --------------
