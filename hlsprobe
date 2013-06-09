@@ -10,7 +10,7 @@ This utility licensed under GPL v3.
 Uses https://pypi.python.org/pypi/m3u8 for M3U8 playlists parsing.
 Scripted in Python2 because m3u8 lib still don't work under Python3.
 """
-__version__ = "0.2"
+__version__ = "0.3"
 
 import sys
 import os
@@ -131,7 +131,6 @@ class MediaProbe:
                         self.log.warn("Bad status %s for (%s) %s stream" % (status, group, uri))
                         self.err("status", "stream", group, name, uri, status)
                         continue
-
                     data = resp.read()
                 except urllib2.URLError:
                     self.log.error("Error on read %s of %s %s" % (uri, group, name))
@@ -258,7 +257,7 @@ class ProblemAnalyzer:
         self.errors = {} # key is (group, stream) and value is (stamp, kind, objtype, uri)
         for val in Source(conf, playlistq, log).flat():
             self.errors[val] = []
-        self.msg = ""
+        self.msgerrs = {}
         self.last_sent = 0
 
     def __call__(self):
@@ -277,7 +276,7 @@ class ProblemAnalyzer:
                     self.err.get(err)
                     for idx, err in enumerate(self.errors[(self.err.group, self.err.stream)]):
                         # Remove old errors
-                        if not err["confirmed"] and (curtime > err["stamp"] + self.conf["timeout"]["keep-error"]):
+                        if not err["confirmed"] and curtime > err["stamp"] + self.conf["timeout"]["keep-error"]:
                             del self.errors[(self.err.group, self.err.stream)][idx]
                             continue
                         # This error appeared more than once
@@ -296,31 +295,32 @@ class ProblemAnalyzer:
                         elif err["objtype"] == "chunk":
                             self.chunkq.put((time.time(), self.err.group, self.err.stream, self.err.uri))
                 # Now make report
-                totalerrs = 0
                 for case in self.errors:
-                    stream_header = False
                     for idx, err in enumerate(self.errors[case]):
                         # Notify if error has not yet reported
                         if not err["reported"] and err["confirmed"]:
                             err["reported"] = True
-                            totalerrs += 1
                             self.errors[case][idx] = err
-                            if not stream_header:
-                                self.msg += "%s %s" % (self.err.objtype.upper(), self.err.stream)
-                                if self.err.group:
-                                    self.msg += " of the group %s" % self.err.group
-                                self.msg += ":\n"
-                                stream_header = True
-                            if err["count"] > 1:
-                                self.msg += "Problem still persists for"
+                            if case in self.msgerrs:
+                                self.msgerrs[case].update({err["uri"]: err})
                             else:
-                                self.msg += "Problem detected for"
-                            self.msg += "%s\n" % self.err.uri
-                            self.msg += "\n"
-                if self.msg and curtime > self.last_sent + self.conf["timeout"]["spam"]: # XXX
-                    self.msg = "Dear human,\n\n" + self.msg + "\n-- \nFor your service,\nHLS prober,\nthe robot."
-                    self.notify.send(self.msg)
-                    self.msg = ""
+                                self.msgerrs[case] = {err["uri"]: err}
+                # Send notify
+                if self.msgerrs and (curtime > self.last_sent + self.conf["timeout"]["spam"]): # XXX
+                    msg = "Dear human,\n\n"
+                    for case in self.msgerrs:
+                        msg += "The stream %s" % case[1]
+                        if self.err.group:
+                            msg += " of the group %s" % case[0]
+                        msg += ":\n"
+                        for uri in self.msgerrs[case]:
+                            if self.msgerrs[case][uri]["count"] > 1:
+                                msg += "- %s still persists for" % self.msgerrs[case][uri]["kind"]
+                            else:
+                                msg += "- %s detected for" % self.msgerrs[case][uri]["kind"]
+                            msg += " %s\n" % uri
+                    msg = msg + "\n-- \nFor your service,\nHLS prober,\nthe robot."
+                    self.notify.send(msg)
                     self.last_sent = curtime
             except KeyboardInterrupt:
                 self.log.info("Exit problem analyzer.")
@@ -339,17 +339,16 @@ class Notify:
 
     def send(self, text):
         self.msg = MIMEText(text)
-        self.msg['Subject'] = check_output('bash -c "echo %s"' % self.subject, shell=True)
+        self.msg['Subject'] = check_output('bash -c "echo %s"' % self.subject, shell=True).strip()
         self.msg['From'] = self.author
         self.msg['To'] = ", ".join(self.to.split(';'))
         self.msg['X-Mailer'] = "HLS Probe v.%s" % __version__
-        print self.msg.as_string()
+        #print self.msg.as_string()
         mail = smtplib.SMTP("localhost")
-        mail.set_debuglevel(9)
+        #mail.set_debuglevel(9)
         try:
             mail.sendmail(self.author, self.to.split(';'), self.msg.as_string())
         except: # SMTPRecipientsRefused:
-            #self.log.debug(
             self.log.warn("Can't delivery notification!")
         mail.quit()
 
@@ -383,11 +382,11 @@ class FlowController:
         self.log = log
         self.slots = []
         conf = Config(confile, log)()
-        # playlistq tasks are lists: (group, stream, uri)
+        # Playlistq tasks are lists: (group, stream, uri)
         playlistq = Queue(conf["workers"]["stream-probers"]*90)
-        # chunkq tasks are lists: (timestamp, group, stream, uri)
+        # Chunkq tasks are lists: (timestamp, group, stream, uri)
         chunkq = Queue(conf["workers"]["media-probers"]*240)
-        # bugq tasks are dicts: {"stamp", "kind", "objtype", "group", "stream", "uri"}
+        # Bugq tasks are dicts: {"stamp", "kind", "objtype", "group", "stream", "uri"}
         bugq = Queue(conf["workers"]["stream-probers"]*8 + conf["workers"]["media-probers"]*8)
         for i in range(1, conf["workers"]["stream-probers"]):
             self.slots.append(Process(target=CupertinoProbe(conf, playlistq, chunkq, bugq, i, log)))
@@ -489,15 +488,3 @@ if __name__ == "__main__":
     main()
 
 # TODO сообщать о проблемах конфигурации в очередь ошибок
-
-
-"""
-- если ошибка новая, добавить в список со статусом unconfirmed
-- новую ошибку отправить на повторную проверку
-- не новую ошибку обновить со статусом confirmed
-- для всех confirmed и not reported ошибок добавить их в новый отчёт
-- занесённые в отчёт ошибки обновить статусом reported
-- reported ошибки с прошедшим lifetime отправить на перепроверку, статус сменить на unconfirmed
-- добавить в отчёт ошибки со статусом reported и confirmed (в кратком виде)
-- отправить отчёт, если прошло время spam-time и если накопилось более min-report-number новых ошибок
-"""
