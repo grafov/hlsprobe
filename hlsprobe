@@ -270,7 +270,7 @@ class ProblemAnalyzer:
                 except:
                     pass
                 else:
-                    r = open("/tmp/report", "w")
+                    r = open("/tmp/errreport", "w") # XXX
                     pprint(self.errors, r)
                     r.close()
                     self.err.get(err)
@@ -315,9 +315,9 @@ class ProblemAnalyzer:
                         msg += ":\n"
                         for uri in self.msgerrs[case]:
                             if self.msgerrs[case][uri]["count"] > 1:
-                                msg += "- %s still persists for" % self.msgerrs[case][uri]["kind"]
+                                msg += "- [%s] %s still persists for" % (time.ctime(self.msgerrs[case][uri]["stamp"]), self.msgerrs[case][uri]["kind"])
                             else:
-                                msg += "- %s detected for" % self.msgerrs[case][uri]["kind"]
+                                msg += "- [%s] %s detected for" % (time.ctime(self.msgerrs[case][uri]["stamp"]), self.msgerrs[case][uri]["kind"])
                             msg += " %s\n" % uri
                     msg = msg + "\n-- \nFor your service,\nHLS prober,\nthe robot."
                     self.notify.send(msg)
