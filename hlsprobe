@@ -37,8 +37,8 @@ class CupertinoProbe:
     Get playlist URLs from the task queue.
     """
     def __init__(self, conf, playlistq, chunkq, bugq, pno, log):
-        """ Initialized with `conf` config, `playlistq` playlist queue, 
-        `chunkq` chunk queje, `bugq` bug queue, `pno` prober instance number 
+        """ Initialized with `conf` config, `playlistq` playlist queue,
+        `chunkq` chunk queje, `bugq` bug queue, `pno` prober instance number
         and `log` logger object.
         """
         self.conf = conf
@@ -103,8 +103,8 @@ class MediaProbe:
     """ Get and analyze media chunks.
     """
     def __init__(self, conf, chunkq, bugq, pno, log):
-        """ Initialized with `conf` configuration object, 
-        `chunkq` chunk queue, `bugq` bug queue, 
+        """ Initialized with `conf` configuration object,
+        `chunkq` chunk queue, `bugq` bug queue,
         `pno` prober instance number and `log` logger object.
         """
         self.conf = conf
@@ -130,7 +130,8 @@ class MediaProbe:
                     if status >= 400:
                         self.log.warn("Bad status %s for (%s) %s stream" % (status, group, uri))
                         self.err("status", "stream", group, name, uri, status)
-                        continue                        
+                        continue
+
                     data = resp.read()
                 except urllib2.URLError:
                     self.log.error("Error on read %s of %s %s" % (uri, group, name))
@@ -226,9 +227,9 @@ class ErrContainer:
         self.group = group
         self.stream = stream
         self.uri = uri
-        msg = {"stamp": self.stamp, "kind": kind, "objtype": objtype,
+        self.msg = {"stamp": self.stamp, "kind": kind, "objtype": objtype,
                "group": group, "stream": stream, "uri": uri}
-        self.bugq.put(msg)
+        self.bugq.put(self.msg)
 
     def get(self, msg):
         self.stamp = msg["stamp"]
@@ -241,7 +242,7 @@ class ErrContainer:
 
 class ProblemAnalyzer:
     """ Gather and analyze problems with streams. Log it or send mail on critical incidents.
-    Probers generate errors of types: timeout, status, empty, media. 
+    Probers generate errors of types: timeout, status, empty, media.
     """
     def __init__(self, conf, bugq, playlistq, chunkq, log):
         """ Initialized with `bugq` bug queue and `log` logger object.
@@ -256,55 +257,71 @@ class ProblemAnalyzer:
         self.chunkq = chunkq
         self.errors = {} # key is (group, stream) and value is (stamp, kind, objtype, uri)
         for val in Source(conf, playlistq, log).flat():
-            self.errors[val] = []        
+            self.errors[val] = []
+        self.msg = ""
+        self.last_sent = 0
 
     def __call__(self):
         nospam = 0
         while True:
             try:
+                curtime = time.time()
                 try:
-                    err = self.bugq.get(timeout=6)
+                    err = self.bugq.get(timeout=3)
                 except:
                     pass
                 else:
-                    curtime = time.time()
+                    r = open("/tmp/report", "w")
+                    pprint(self.errors, r)
+                    r.close()
                     self.err.get(err)
                     for idx, err in enumerate(self.errors[(self.err.group, self.err.stream)]):
                         # Remove old errors
-                        if curtime > err["stamp"] + self.conf["timeout"]["error"]:
+                        if not err["confirmed"] and (curtime > err["stamp"] + self.conf["timeout"]["keep-error"]):
                             del self.errors[(self.err.group, self.err.stream)][idx]
                             continue
+                        # This error appeared more than once
                         if err["kind"] == self.err.kind and err["objtype"] == self.err.objtype and err["uri"] == self.err.uri:
                             err["count"] += 1
                             err["reported"] = False
+                            err["confirmed"] = True
                             self.errors[(self.err.group, self.err.stream)][idx] = err
                             break
                     else:
-                        self.errors[(self.err.group, self.err.stream)].append({"stamp": self.err.stamp, "kind": self.err.kind, "objtype": self.err.objtype, "uri": self.err.uri, "count": 0, "reported": False})        
-                        # If error only once appeared then we do doublecheck
+                        # This is a new error
+                        self.errors[(self.err.group, self.err.stream)].append({"stamp": self.err.stamp, "kind": self.err.kind, "objtype": self.err.objtype, "uri": self.err.uri, "count": 0, "reported": False, "confirmed": False})
+                        # Double check this error
                         if err["objtype"] == "playlist":
                             self.playlistq.put((self.err.group, self.err.stream, self.err.uri))
                         elif err["objtype"] == "chunk":
                             self.chunkq.put((time.time(), self.err.group, self.err.stream, self.err.uri))
-                nospam += 1
-                if nospam < 6:
-                    continue
-                else:
-                    nospam = 0
-                msg = ""
+                # Now make report
+                totalerrs = 0
                 for case in self.errors:
+                    stream_header = False
                     for idx, err in enumerate(self.errors[case]):
                         # Notify if error has not yet reported
-                        if not err["reported"]:
+                        if not err["reported"] and err["confirmed"]:
                             err["reported"] = True
+                            totalerrs += 1
                             self.errors[case][idx] = err
-                            print self.errors[(self.err.group, self.err.stream)][idx]
-                            msg += "Problem detected in the %s of the stream %s of the group %s.\n" % (self.err.objtype, self.err.stream, self.err.group)
-                            msg += "Fetch failed in URI %s\n" % self.err.uri
-                            msg += "\n"
-                if msg:
-                    msg = "Dear human,\n\n" + msg + "\n-- \nFor your service,\nHLS prober,\nthe robot."
-                    self.notify.send(msg)
+                            if not stream_header:
+                                self.msg += "%s %s" % (self.err.objtype.upper(), self.err.stream)
+                                if self.err.group:
+                                    self.msg += " of the group %s" % self.err.group
+                                self.msg += ":\n"
+                                stream_header = True
+                            if err["count"] > 1:
+                                self.msg += "Problem still persists for"
+                            else:
+                                self.msg += "Problem detected for"
+                            self.msg += "%s\n" % self.err.uri
+                            self.msg += "\n"
+                if self.msg and curtime > self.last_sent + self.conf["timeout"]["spam"]: # XXX
+                    self.msg = "Dear human,\n\n" + self.msg + "\n-- \nFor your service,\nHLS prober,\nthe robot."
+                    self.notify.send(self.msg)
+                    self.msg = ""
+                    self.last_sent = curtime
             except KeyboardInterrupt:
                 self.log.info("Exit problem analyzer.")
 
@@ -321,15 +338,16 @@ class Notify:
         self.log = log
 
     def send(self, text):
-        msg = MIMEText(text)
-        msg['Subject'] = check_output('bash -c "echo %s"' % self.subject, shell=True)
-        msg['From'] = self.author
-        msg['To'] = ", ".join(self.to.split(';'))
-        msg['X-Mailer'] = "HLS Probe v.%s" % __version__
-        print msg.as_string()
+        self.msg = MIMEText(text)
+        self.msg['Subject'] = check_output('bash -c "echo %s"' % self.subject, shell=True)
+        self.msg['From'] = self.author
+        self.msg['To'] = ", ".join(self.to.split(';'))
+        self.msg['X-Mailer'] = "HLS Probe v.%s" % __version__
+        print self.msg.as_string()
         mail = smtplib.SMTP("localhost")
+        mail.set_debuglevel(9)
         try:
-            mail.sendmail(self.author, self.to.split(';'), msg.as_string())
+            mail.sendmail(self.author, self.to.split(';'), self.msg.as_string())
         except: # SMTPRecipientsRefused:
             #self.log.debug(
             self.log.warn("Can't delivery notification!")
@@ -366,11 +384,11 @@ class FlowController:
         self.slots = []
         conf = Config(confile, log)()
         # playlistq tasks are lists: (group, stream, uri)
-        playlistq = Queue(conf["workers"]["stream-probers"]*60)
+        playlistq = Queue(conf["workers"]["stream-probers"]*90)
         # chunkq tasks are lists: (timestamp, group, stream, uri)
-        chunkq = Queue(conf["workers"]["media-probers"]*120)
-        # bugq tasks are dicts: {"stamp", "kind", "objtype", "group", "stream", "uri"} 
-        bugq = Queue(conf["workers"]["stream-probers"]*4 + conf["workers"]["media-probers"]*4)
+        chunkq = Queue(conf["workers"]["media-probers"]*240)
+        # bugq tasks are dicts: {"stamp", "kind", "objtype", "group", "stream", "uri"}
+        bugq = Queue(conf["workers"]["stream-probers"]*8 + conf["workers"]["media-probers"]*8)
         for i in range(1, conf["workers"]["stream-probers"]):
             self.slots.append(Process(target=CupertinoProbe(conf, playlistq, chunkq, bugq, i, log)))
         log.debug("%d stream probers forked." % conf["workers"]["stream-probers"])
@@ -416,11 +434,11 @@ class Logger:
         else:
             self.last = msg
             return True
-        
+
     def debug(self, msg):
         if self._check_doubles(msg):
             self.log.info(msg)
-        
+
     def info(self, msg):
         if self._check_doubles(msg):
             self.log.info(msg)
@@ -432,6 +450,10 @@ class Logger:
     def error(self, msg):
         if self._check_doubles(msg):
             self.log.error(msg)
+
+    def fatal(self, msg):
+        if self._check_doubles(msg):
+            self.log.fatal(msg)
 
 
 def base_uri(uri):
@@ -468,3 +490,14 @@ if __name__ == "__main__":
 
 # TODO сообщать о проблемах конфигурации в очередь ошибок
 
+
+"""
+- если ошибка новая, добавить в список со статусом unconfirmed
+- новую ошибку отправить на повторную проверку
+- не новую ошибку обновить со статусом confirmed
+- для всех confirmed и not reported ошибок добавить их в новый отчёт
+- занесённые в отчёт ошибки обновить статусом reported
+- reported ошибки с прошедшим lifetime отправить на перепроверку, статус сменить на unconfirmed
+- добавить в отчёт ошибки со статусом reported и confirmed (в кратком виде)
+- отправить отчёт, если прошло время spam-time и если накопилось более min-report-number новых ошибок
+"""
