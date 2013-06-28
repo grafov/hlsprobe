@@ -24,6 +24,7 @@ import m3u8
 import yaml
 import optparse
 import urlparse
+import socket
 from email.mime.text import MIMEText
 from multiprocessing import Process, Queue
 from subprocess import check_output #, call, Popen, PIPE
@@ -58,6 +59,10 @@ class CupertinoProbe:
                     resp = urllib2.urlopen(uri, timeout=self.conf["timeout"]["read"])
                 except urllib2.URLError:
                     self.log.warn("Failed to open (%s) %s stream" % (group, uri))
+                    self.err("open", "stream", group, name, uri)
+                    continue
+                except socket.timeout:
+                    self.log.warn("Timeout occurs on (%s) %s stream" % (group, uri))
                     self.err("timeout", "stream", group, name, uri)
                     continue
                 # Check for client error or server error
@@ -95,6 +100,9 @@ class CupertinoProbe:
                             self.log.debug("Chunk queue is full (%d). Probably you need to increase number of media probers. Check `workers/media-probers` value." % self.chunkq.qsize())
                             time.sleep(3)
                         self.chunkq.put((time.time(), group, name, "%s/%s" % (baseuri, seg.uri)))
+                        # for economy we are probe only one chunk in the chunklist
+                        if self.conf["mode"]["one-segment"]:
+                            break
             except KeyboardInterrupt:
                 self.log.info("Finalize cupertino prober %s." % self.pno)
 
@@ -135,6 +143,9 @@ class MediaProbe:
                 except urllib2.URLError:
                     self.log.error("Error on read %s of %s %s" % (uri, group, name))
                     self.err("status", "chunk", group, name, uri)
+                except socket.timeout:
+                    self.log.error("Timeout occurs on read %s of %s %s" % (uri, group, name))
+                    self.err("timeout", "chunk", group, name, uri)
                 self.log.debug("Probed chunk %s (len %d)" % (uri, len(data)))
                 if len(self.loaded) > 96:
                     self.loaded = self.loaded[32:]
@@ -202,12 +213,6 @@ class Source:
 class ErrContainer:
     """ Container for transferring error messages between processes.
     """
-    errors = ['timeout',  # request timeout, resource not available
-              'status',   # status not equal 200 (resource not found, forbidden, etc.)
-              'empty',    # playlist or chunk is empty
-              'meta',
-              'other']     # incorrect media info on chunk data or stream metadata
-
     def __init__(self, bugq):
         """ Initialized with `bugq` bug queue and `where` place where error appear.
         """
@@ -226,8 +231,9 @@ class ErrContainer:
         self.group = group
         self.stream = stream
         self.uri = uri
+        self.status = status
         self.msg = {"stamp": self.stamp, "kind": kind, "objtype": objtype,
-               "group": group, "stream": stream, "uri": uri}
+               "group": group, "stream": stream, "uri": uri, "status": status}
         self.bugq.put(self.msg)
 
     def get(self, msg):
@@ -270,7 +276,7 @@ class ProblemAnalyzer:
                 except:
                     pass
                 else:
-                    r = open("/tmp/errreport", "w") # XXX
+                    r = open("/tmp/report", "w") # XXX
                     pprint(self.errors, r)
                     r.close()
                     self.err.get(err)
@@ -305,6 +311,9 @@ class ProblemAnalyzer:
                                 self.msgerrs[case].update({err["uri"]: err})
                             else:
                                 self.msgerrs[case] = {err["uri"]: err}
+                r = open("/tmp/msgerrs", "w") # XXX
+                pprint(self.msgerrs, r)
+                r.close()
                 # Send notify
                 if self.msgerrs and (curtime > self.last_sent + self.conf["timeout"]["spam"]): # XXX
                     msg = "Dear human,\n\n"
@@ -314,10 +323,15 @@ class ProblemAnalyzer:
                             msg += " of the group %s" % case[0]
                         msg += ":\n"
                         for uri in self.msgerrs[case]:
+                            kind = self.msgerrs[case][uri]["kind"]
+                            if kind == "status":
+                                kind = "bad status %s" % self.msgerrs[case][uri]["status"]
+                            elif kind == "empty":
+                                kind = "empty body"
                             if self.msgerrs[case][uri]["count"] > 1:
-                                msg += "- [%s] %s still persists for" % (time.ctime(self.msgerrs[case][uri]["stamp"]), self.msgerrs[case][uri]["kind"])
+                                msg += "- [%s] %s still persists for" % (time.ctime(self.msgerrs[case][uri]["stamp"]), kind)
                             else:
-                                msg += "- [%s] %s detected for" % (time.ctime(self.msgerrs[case][uri]["stamp"]), self.msgerrs[case][uri]["kind"])
+                                msg += "- [%s] %s detected for" % (time.ctime(self.msgerrs[case][uri]["stamp"]), kind)
                             msg += " %s\n" % uri
                     msg = msg + "\n-- \nFor your service,\nHLS prober,\nthe robot."
                     self.notify.send(msg)
@@ -336,10 +350,16 @@ class Notify:
         self.author = conf["notify"]["author"]
         self.to = conf["notify"]["addresses"]
         self.log = log
+        self.send("Dear human,\nHLS probe v%s started at %s." % (__version__, time.ctime()), "HLS probe started on $HOSTNAME")
 
-    def send(self, text):
+    def subjparse(self, subject):
+        return check_output('bash -c "echo %s"' % subject, shell=True).strip()
+
+    def send(self, text, subject=""):
         self.msg = MIMEText(text)
-        self.msg['Subject'] = check_output('bash -c "echo %s"' % self.subject, shell=True).strip()
+        if not subject:
+            subject = self.subject
+        self.msg['Subject'] = self.subjparse(subject)
         self.msg['From'] = self.author
         self.msg['To'] = ", ".join(self.to.split(';'))
         self.msg['X-Mailer'] = "HLS Probe v.%s" % __version__
@@ -348,6 +368,7 @@ class Notify:
         #mail.set_debuglevel(9)
         try:
             mail.sendmail(self.author, self.to.split(';'), self.msg.as_string())
+            self.log.info("Mail delivered.")
         except: # SMTPRecipientsRefused:
             self.log.warn("Can't delivery notification!")
         mail.quit()
@@ -488,3 +509,4 @@ if __name__ == "__main__":
     main()
 
 # TODO сообщать о проблемах конфигурации в очередь ошибок
+# TODO опция (default): убрать проверку последовательных чанков, проверять только первый чанк плейлиста
