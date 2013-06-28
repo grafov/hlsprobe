@@ -1,3 +1,4 @@
+# mode:yaml
 # Sample config for the `hlsprobe`
 #
 # Configuration file in YAML format (http://yaml.org).
@@ -20,8 +21,22 @@ streams:
       - subgroup: # Groups may be nested to any level.
           - http://srv1.example.com/playlist1.m3u8
           - http://example.com/playlist2.m3u8
-
 # Define number of workers (independent proceses which parse and analyze playlists).
 workers:
-  
-      
+  stream-probers: 8
+  media-probers: 32
+notify:
+  report-threshold: 2
+  addresses: admin@example.com, admin2@example.com
+  author: hlsprobe@example.com
+  subject: HLS probe on $HOSTNAME alert
+sleep:
+  playlist-open: 0
+  streams-list: 2
+timeout:
+  target-duration: 150
+  read: 12
+  keep-error: 10
+  spam: 120
+mode:
+  one-segment: true
