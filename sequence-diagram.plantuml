@@ -1,0 +1,64 @@
+Проблемы:
+
+1 нет ответа сервера (timeout)
+2 есть ответ сервера - ресурс не найден или запрещён (40x)
+3 вариантный плейлист пустой (некорректный smil)
+4 плейлист битрейта пустой
+5 чанк не проходит mediainfo
+6 сбой (любая из ошибок выше) для всей группы ресурсов [определить группы]
+7 mediainfo канала не совпадает с заданным
+8 битрейты не совпадают с заданными 
+
+@startuml
+
+title HLS Probe Workflow
+
+participant FlowController
+participant Source
+participant Playlists <<queue>>
+participant CupertinoProbe
+participant Chunks <<queue>>
+participant MediaProbe
+participant Errors <<queue>>
+participant ProblemAnalyzer
+
+== Initialization ==
+
+activate FlowController
+
+FlowController-->Playlists: create queue
+activate Playlists
+FlowController-->Chunks: create queue
+activate Chunks
+FlowController-->Errors: create queue
+activate Errors
+
+FlowController-->Source: spawn process
+activate Source
+FlowController-->CupertinoProbe: spawn process
+activate CupertinoProbe
+FlowController-->MediaProbe: spawn process
+activate MediaProbe
+FlowController-->ProblemAnalyzer: spawn process
+activate ProblemAnalyzer
+
+== Main flow ==
+
+Source->Source: choice (random or sequental) stream URI 
+Source->Playlists: put URI
+CupertinoProbe<-Playlists: get URI
+
+
+== End of work ==
+
+deactivate Source
+FlowController-->ProblemAnalyzer: end process
+deactivate ProblemAnalyzer
+deactivate CupertinoProbe
+deactivate MediaProbe
+deactivate Chunks
+deactivate Playlists
+deactivate Errors
+deactivate FlowController
+
+@enduml
