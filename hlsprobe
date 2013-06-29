@@ -10,7 +10,7 @@ This utility licensed under GPL v3.
 Uses https://pypi.python.org/pypi/m3u8 for M3U8 playlists parsing.
 Scripted in Python2 because m3u8 lib still don't work under Python3.
 """
-__version__ = "0.3"
+__version__ = "0.4"
 
 import sys
 import os
@@ -388,8 +388,8 @@ class Config:
         except IOError:
             log.fatal("Can't open config file. Exit.")
             exit(1)
-        except yaml.scanner.ScannerError, e:
-            log.fatal("Error parsing config: %s" % e)
+        except yaml.scanner.ScannerError, err:
+            log.fatal("Error parsing config: %s" % err)
             exit(1)
 
     def __call__(self):
@@ -489,7 +489,7 @@ def main():
     """
     cli = optparse.OptionParser()
     cli.add_option("--show-config", action="store_true", dest="show_config", help="Show parsed config (for debug purposes).")
-    cli.add_option("--config", dest="conf", help="Use alternative configuration file.")
+    cli.add_option("-c", "--config", dest="conf", help="Use alternative configuration file.")
     cli.add_option("-v", "--verbose", dest="verbose", action="store_true", help="Show more probing details (for debug purposes).")
     opt, _ = cli.parse_args()
     if opt.conf:
