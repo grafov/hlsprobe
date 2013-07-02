@@ -171,6 +171,7 @@ class Source:
         self.log = log
         self.streamlist = []
         self._walk(conf["streams"])
+        log.debug("%d stream links loaded." % len(self.streamlist))
 
     def _walk(self, streams, parent=""):
         """ Recursive walk of `streams` configuration tree.
