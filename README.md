@@ -2,7 +2,7 @@ HLS Probe Utility
 =================
 
 Utility to detect errors in HTTP Live Streams (Apple HLS).
-It may be used regular monitoring tool and mediaserver stress testing. 
+It may be used regular monitoring tool and mediaserver stress testing.
 Features are:
 
  * parse M3U8-playlists (variant and single-bitrate playlists supported)
@@ -14,6 +14,9 @@ Planned features:
  * probe chunks with `mediainfo` utility (from libav)
 
 This utility can't be used for HLS playback.
+
+This Python version are maintained but development moved to version on Go language:
+https://github.com/grafov/hlsprobe2
 
 Install
 -------
